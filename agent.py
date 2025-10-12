@@ -3,90 +3,245 @@ from agents.extensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
 from agents.realtime import RealtimeAgent, realtime_handoff
 
 """
-When running the UI example locally, you can edit this file to change the setup. THe server
-will use the agent returned from get_starting_agent() as the starting agent."""
+Local UI example entrypoint. The server will use get_starting_agent() as
+the starting agent.
+This file defines a minimal pizza-ordering MVP with a Triage and Order agent,
+plus inventory and order-state tools.
+"""
 
-### TOOLS
+# --- Inventory ---
+PIZZAS = [
+    {"id": "p_margherita", "name": "Margherita", "price": 9.5},
+    {"id": "p_pepperoni", "name": "Pepperoni", "price": 10.5},
+    {"id": "p_vegan_margherita", "name": "Vegan Margherita", "price": 10.5},
+    {"id": "p_bbq_meat_lovers", "name": "BBQ Meat Lovers", "price": 12.0},
+    {"id": "p_caprese", "name": "Caprese", "price": 11.0},
+]
 
+DRINKS = [
+    {"id": "d_coke", "name": "Coca-Cola 330ml", "price": 2.5},
+    {"id": "d_coke_zero", "name": "Coca-Cola Zero 330ml", "price": 2.5},
+    {"id": "d_fanta", "name": "Fanta 330ml", "price": 2.5},
+    {"id": "d_rb", "name": "Red Bull", "price": 3.0},
+    {"id": "d_spa", "name": "Spa Blauw", "price": 2.0},
+]
 
-@function_tool(
-    name_override="faq_lookup_tool", description_override="Lookup frequently asked questions."
-)
-async def faq_lookup_tool(question: str) -> str:
-    if "bag" in question or "baggage" in question:
-        return (
-            "You are allowed to bring one bag on the plane. "
-            "It must be under 50 pounds and 22 inches x 14 inches x 9 inches."
-        )
-    elif "seats" in question or "plane" in question:
-        return (
-            "There are 120 seats on the plane. "
-            "There are 22 business class seats and 98 economy seats. "
-            "Exit rows are rows 4 and 16. "
-            "Rows 5-8 are Economy Plus, with extra legroom. "
-        )
-    elif "wifi" in question:
-        return "We have free wifi on the plane, join Airline-Wifi"
-    return "I'm sorry, I don't know the answer to that question."
-
-
-@function_tool
-async def update_seat(confirmation_number: str, new_seat: str) -> str:
-    """
-    Update the seat for a given confirmation number.
-
-    Args:
-        confirmation_number: The confirmation number for the flight.
-        new_seat: The new seat to update to.
-    """
-    return f"Updated seat to {new_seat} for confirmation number {confirmation_number}"
+SIZES = ["25cm", "30cm", "35cm"]
 
 
-@function_tool
-def get_weather(city: str) -> str:
-    """Get the weather in a city."""
-    return f"The weather in {city} is sunny."
+# --- Order state (simple in‑process MVP store) ---
+# Note: This demo keeps a single global state instance. In a multi-session
+# setup you would scope this by session/thread.
+ORDER_STATE = {
+    "items": [],  # list[{name, qty, size}]
+    "drinks": [],  # list[{name, qty}]
+    "size_all": None,
+}
 
 
-faq_agent = RealtimeAgent(
-    name="FAQ Agent",
-    handoff_description="A helpful agent that can answer questions about the airline.",
-    instructions=f"""{RECOMMENDED_PROMPT_PREFIX}
-    You are an FAQ agent. If you are speaking to a customer, you probably were transferred to from the triage agent.
-    Use the following routine to support the customer.
-    # Routine
-    1. Identify the last question asked by the customer.
-    2. Use the faq lookup tool to answer the question. Do not rely on your own knowledge.
-    3. If you cannot answer the question, transfer back to the triage agent.""",
-    tools=[faq_lookup_tool],
-)
+def _prices_by_name() -> dict:
+    return {x["name"]: x["price"] for x in (PIZZAS + DRINKS)}
 
-seat_booking_agent = RealtimeAgent(
-    name="Seat Booking Agent",
-    handoff_description="A helpful agent that can update a seat on a flight.",
-    instructions=f"""{RECOMMENDED_PROMPT_PREFIX}
-    You are a seat booking agent. If you are speaking to a customer, you probably were transferred to from the triage agent.
-    Use the following routine to support the customer.
-    # Routine
-    1. Ask for their confirmation number.
-    2. Ask the customer what their desired seat number is.
-    3. Use the update seat tool to update the seat on the flight.
-    If the customer asks a question that is not related to the routine, transfer back to the triage agent. """,
-    tools=[update_seat],
-)
+
+def _normalize_size(size: str) -> str | None:
+    if not size:
+        return None
+    s = str(size).lower().strip().replace(" ", "")
+    if s.endswith("cm"):
+        s2 = s
+    else:
+        s2 = f"{s}cm" if s.isdigit() else s
+    return s2 if s2 in SIZES else None
+
+
+# --- Inventory Tools ---
+@function_tool(name_override="inventory_list_pizzas")
+def inventory_list_pizzas() -> list[dict]:
+    return PIZZAS
+
+
+@function_tool(name_override="inventory_list_drinks")
+def inventory_list_drinks() -> list[dict]:
+    return DRINKS
+
+
+@function_tool(name_override="inventory_normalize_item")
+def inventory_normalize_item(text: str) -> dict:
+    """Return canonical name/type for a free-text item, naive aliases."""
+    if not text:
+        return {"canonical_name": None, "type": None, "confidence": 0.0}
+    t = text.lower().strip()
+    aliases = {
+        # pizzas
+        "margarita": "Margherita",
+        "margherita": "Margherita",
+        "margharita": "Margherita",
+        "pepperoni": "Pepperoni",
+        "vegan margherita": "Vegan Margherita",
+        "vegan margarita": "Vegan Margherita",
+        "bbq meat": "BBQ Meat Lovers",
+        "bbq meat lovers": "BBQ Meat Lovers",
+        "caprese": "Caprese",
+        # drinks
+        "kola": "Coca-Cola 330ml",
+        "coca cola": "Coca-Cola 330ml",
+        "coke": "Coca-Cola 330ml",
+        "coke zero": "Coca-Cola Zero 330ml",
+        "kola zero": "Coca-Cola Zero 330ml",
+        "fanta": "Fanta 330ml",
+        "red bull": "Red Bull",
+        "spa": "Spa Blauw",
+    }
+    name = aliases.get(t)
+    if not name:
+        return {"canonical_name": None, "type": None, "confidence": 0.0}
+    typ = "pizza" if any(p["name"] == name for p in PIZZAS) else "drink"
+    return {"canonical_name": name, "type": typ, "confidence": 0.95}
+
+
+# --- Order State Tools ---
+@function_tool(name_override="order_state_clear")
+def order_state_clear() -> str:
+    ORDER_STATE["items"] = []
+    ORDER_STATE["drinks"] = []
+    ORDER_STATE["size_all"] = None
+    return "cleared"
+
+
+@function_tool(name_override="order_state_add_item")
+def order_state_add_item(product_name: str, quantity: int) -> dict:
+    q = max(1, int(quantity))
+    ORDER_STATE["items"].append({"name": product_name, "qty": q, "size": ORDER_STATE["size_all"]})
+    return {"ok": True, "items": ORDER_STATE["items"]}
+
+
+@function_tool(name_override="order_state_set_size_for_all")
+def order_state_set_size_for_all(size: str) -> dict:
+    s = _normalize_size(size)
+    if not s:
+        return {"ok": False, "error": "invalid_size", "allowed": SIZES}
+    ORDER_STATE["size_all"] = s
+    for it in ORDER_STATE["items"]:
+        it["size"] = s
+    return {"ok": True, "size_all": s, "items": ORDER_STATE["items"]}
+
+
+@function_tool(name_override="order_state_add_drink")
+def order_state_add_drink(product_name: str, quantity: int) -> dict:
+    q = max(1, int(quantity))
+    ORDER_STATE["drinks"].append({"name": product_name, "qty": q})
+    return {"ok": True, "drinks": ORDER_STATE["drinks"]}
+
+
+@function_tool(name_override="order_state_summary")
+def order_state_summary() -> dict:
+    prices = _prices_by_name()
+    total = 0.0
+    for it in ORDER_STATE["items"]:
+        total += prices.get(it["name"], 0.0) * int(it.get("qty", 1))
+    for dr in ORDER_STATE["drinks"]:
+        total += prices.get(dr["name"], 0.0) * int(dr.get("qty", 1))
+    return {
+        "items": ORDER_STATE["items"],
+        "drinks": ORDER_STATE["drinks"],
+        "size_all": ORDER_STATE["size_all"],
+        "total": round(total, 2),
+    }
+
+
+@function_tool(name_override="order_state_confirm")
+def order_state_confirm() -> dict:
+    import uuid
+    return {"order_id": "ORD-" + uuid.uuid4().hex[:8].upper()}
+
+
+# --- Agents ---
+# Multi-lingual short prompts (TR/EN/NL)
+TRIAGE_GREET = {
+    "TR": "Merhaba! Sipariş vermek ister misiniz?",
+    "EN": "Hi! Would you like to place an order?",
+    "NL": "Hoi! Wilt u een bestelling plaatsen?",
+}
+
+ORDER_PROMPTS = {
+    "PRODUCT_QTY": {
+        "TR": "Hangi pizzalar ve kaç adet?",
+        "EN": "Which pizzas and how many?",
+        "NL": "Welke pizza’s en hoeveel?",
+    },
+    "SIZE": {
+        "TR": "Hepsi için boyut? 25, 30 veya 35 cm.",
+        "EN": "Size for all? 25, 30 or 35 cm.",
+        "NL": "Maat voor alle pizza’s? 25, 30 of 35 cm.",
+    },
+    "DRINK": {
+        "TR": "İçecek ister misiniz?",
+        "EN": "Any drinks?",
+        "NL": "Wilt u drankjes?",
+    },
+    "SUMMARY": {
+        "TR": "Özet: {summary}. Onaylıyor musunuz?",
+        "EN": "Summary: {summary}. Confirm?",
+        "NL": "Samenvatting: {summary}. Bevestigen?",
+    },
+}
+
 
 triage_agent = RealtimeAgent(
-    name="Triage Agent",
-    handoff_description="A triage agent that can delegate a customer's request to the appropriate agent.",
-    instructions=(
-        f"{RECOMMENDED_PROMPT_PREFIX} "
-        "You are a helpful triaging agent. You can use your tools to delegate questions to other appropriate agents."
-    ),
-    handoffs=[faq_agent, realtime_handoff(seat_booking_agent)],
+    name="TriageAgent",
+    handoff_description="Detects language (TR/EN/NL), reprompts briefly on silence, and hands off to OrderAgent for ordering.",
+    instructions=f"""{RECOMMENDED_PROMPT_PREFIX}
+You are a triage agent. From the user's FIRST utterance only, detect the language among Turkish/English/Dutch and silently lock a variable language to that value. Always speak in that locked language. Do NOT re-detect on subsequent turns.
+
+If the user's intent includes ordering (keywords like: 'sipariş', 'vermek', 'order', 'bestellen'), perform a handoff to OrderAgent.
+On small talk or silence, give a short reprompt in the locked language.
+
+Use the following first-line greeting in the locked language only (do not show other languages):
+- TR: {TRIAGE_GREET['TR']}
+- EN: {TRIAGE_GREET['EN']}
+- NL: {TRIAGE_GREET['NL']}
+""",
 )
 
-faq_agent.handoffs.append(triage_agent)
-seat_booking_agent.handoffs.append(triage_agent)
+
+order_agent = RealtimeAgent(
+    name="OrderAgent",
+    handoff_description="Collects pizza order details and confirms.",
+    instructions=f"""{RECOMMENDED_PROMPT_PREFIX}
+You are the order agent. The conversation language is fixed as language from triage; respond only in that language.
+
+Goal: Collect pizza names and quantities (canonical menu only), then a single size for all pizzas (allowed: 25cm/30cm/35cm), then whether they want drinks, then read a summary and ask for confirmation.
+
+Rules:
+- On your first turn after handoff, call order_state_clear() to reset state.
+- Use Inventory tools to validate or normalize items (inventory_normalize_item). Accept only canonical names from the menu.
+- Use Order State tools for ALL writes: order_state_add_item, order_state_set_size_for_all, order_state_add_drink, order_state_summary, order_state_confirm.
+- If input is invalid or uncertain, briefly reprompt. Ignore unrelated chit-chat.
+- Ask only what is necessary; proceed step-by-step.
+
+Step prompts (respond in the locked language):
+- Product+Qty: TR: {ORDER_PROMPTS['PRODUCT_QTY']['TR']} | EN: {ORDER_PROMPTS['PRODUCT_QTY']['EN']} | NL: {ORDER_PROMPTS['PRODUCT_QTY']['NL']}
+- Size: TR: {ORDER_PROMPTS['SIZE']['TR']} | EN: {ORDER_PROMPTS['SIZE']['EN']} | NL: {ORDER_PROMPTS['SIZE']['NL']}
+- Drink: TR: {ORDER_PROMPTS['DRINK']['TR']} | EN: {ORDER_PROMPTS['DRINK']['EN']} | NL: {ORDER_PROMPTS['DRINK']['NL']}
+- Summary/Confirm: TR/EN/NL template above; call order_state_summary() then ask to confirm.
+""",
+    tools=[
+        inventory_list_pizzas,
+        inventory_list_drinks,
+        inventory_normalize_item,
+        order_state_clear,
+        order_state_add_item,
+        order_state_set_size_for_all,
+        order_state_add_drink,
+        order_state_summary,
+        order_state_confirm,
+    ],
+)
+
+
+# Configure handoffs
+triage_agent.handoffs = [realtime_handoff(order_agent)]
+order_agent.handoffs = [realtime_handoff(triage_agent)]
 
 
 def get_starting_agent() -> RealtimeAgent:
