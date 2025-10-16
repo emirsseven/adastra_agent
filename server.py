@@ -45,7 +45,20 @@ class RealtimeWebSocketManager:
 
         agent = get_starting_agent()
         runner = RealtimeRunner(agent)
-        session_context = await runner.run()
+        #session_context = await runner.run()
+        session_context = await runner.run(
+            model_config={
+            "initial_model_settings": {
+            "model_name": "gpt-realtime-mini",
+            "voice": "ash",
+            "modalities": ["audio"],
+            "input_audio_format": "pcm16",
+            "output_audio_format": "pcm16",
+            "input_audio_transcription": {"model": "gpt-4o-transcribe"}, # anlam isini sanki biraz daha iyi yapiyor.
+            "turn_detection": {"type": "semantic_vad", "interrupt_response": True},
+            }
+            }
+            )
         session = await session_context.__aenter__()
         self.active_sessions[session_id] = session
         self.session_contexts[session_id] = session_context
