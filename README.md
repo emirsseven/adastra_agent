@@ -6,6 +6,8 @@ A web-based realtime voice assistant demo with a FastAPI backend and HTML/JS fro
 
 Install the required dependencies:
 
+EXPORT ILE  OPENAI_API_KEY enviroment variable olarak tanimlayin. 
+
 ```bash
 uv add fastapi uvicorn websockets
 ```
