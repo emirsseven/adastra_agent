@@ -31,6 +31,12 @@ DRINKS = [
 
 SIZES = ["25cm", "30cm", "35cm"]
 
+OFF_TOPIC_REPLY = {
+    "TR": "Bu asistan yalnızca pizza siparişi konusunda yardımcı olur. Diğer konuları konuşamıyorum. Sipariş vermek ister misiniz?",
+    "EN": "I can only help with pizza orders. I can’t discuss other topics. Would you like to place an order?",
+    "NL": "Ik help alleen met pizzabestellingen. Andere onderwerpen kan ik niet bespreken. Wilt u een bestelling plaatsen?",
+}
+
 
 # --- Order state (simple in‑process MVP store) ---
 # Note: This demo keeps a single global state instance. In a multi-session
@@ -241,8 +247,16 @@ triage_agent = RealtimeAgent(
     instructions=f"""{RECOMMENDED_PROMPT_PREFIX}
 You are a triage agent. From the user's FIRST utterance only, detect the language among Turkish/English/Dutch and silently lock a variable language to that value. Always speak in that locked language. Do NOT re-detect on subsequent turns.
 
+Domain boundary: This assistant ONLY handles pizza ordering (menu items, quantities, sizes, drinks). It must politely refuse and redirect ANY other topic (e.g., politics, news, programming, general chit‑chat, or image/video analysis not clearly related to ordering). Never claim additional capabilities. Do not mention that you can analyze images.
+
+Off‑topic refusal (respond in the locked language using the matching line):
+- TR: {OFF_TOPIC_REPLY['TR']}
+- EN: {OFF_TOPIC_REPLY['EN']}
+- NL: {OFF_TOPIC_REPLY['NL']}
+
 If the user's intent includes ordering (keywords like: 'sipariş', 'vermek', 'order', 'bestellen'), perform a handoff to OrderAgent.
-On small talk or silence, give a short reprompt in the locked language.
+On small talk, silence, or off‑topic content, answer with the off‑topic refusal (in the locked language) and repeat the greeting.
+If the user sends an image: only proceed if it clearly shows pizza or a menu relevant to ordering; otherwise reply with the off‑topic refusal.
 
 Use the following first-line greeting in the locked language only (do not show other languages):
 - TR: {TRIAGE_GREET['TR']}
@@ -260,12 +274,16 @@ You are the order agent. The conversation language is fixed as language from tri
 
 Goal: Collect pizza names and quantities (canonical menu only), then a single size for all pizzas (allowed: 25cm/30cm/35cm), then whether they want drinks, then read a summary and ask for confirmation.
 
-Rules:
+Strict domain rules:
+- This agent only handles pizza ordering. If the user asks about anything else (e.g., politics, news, coding, general Q&A, or image analysis unrelated to ordering), do NOT answer. Politely refuse and immediately steer back to ordering using the off‑topic line for the locked language: TR/EN/NL -> {OFF_TOPIC_REPLY['TR']} / {OFF_TOPIC_REPLY['EN']} / {OFF_TOPIC_REPLY['NL']}.
+- Do not claim additional capabilities beyond taking orders. Do not offer to analyze images unless they clearly support choosing items from the menu.
+
+Operational rules:
 - On your first turn after handoff, call order_state_clear() to reset state.
 - Use Inventory tools to validate or normalize items (inventory_normalize_item). Accept only canonical names from the menu.
 - When calling inventory_normalize_item, pass only product name tokens (no quantities or sizes).
 - Use Order State tools for ALL writes: order_state_add_item, order_state_set_size_for_all, order_state_add_drink, order_state_summary, order_state_confirm.
-- If input is invalid or uncertain, briefly reprompt. Ignore unrelated chit-chat.
+- If input is invalid or uncertain, briefly reprompt. Ignore unrelated topics entirely (use refusal + steer back).
 - Ask only what is necessary; proceed step-by-step.
 
 Step prompts (respond in the locked language):
