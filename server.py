@@ -15,6 +15,11 @@ from agents.realtime import RealtimeRunner, RealtimeSession, RealtimeSessionEven
 from agents.realtime.config import RealtimeUserInputMessage
 from agents.realtime.model_inputs import RealtimeModelSendRawMessage
 
+from dotenv import load_dotenv
+load_dotenv()
+import os
+openai_api_key = os.environ["OPENAI_API_KEY"]
+
 # Import TwilioHandler class - handle both module and package use cases
 if TYPE_CHECKING:
     # For type checking, use the relative import
