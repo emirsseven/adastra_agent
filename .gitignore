@@ -1,3 +1,7 @@
 __pycache__
 .python-version
+<<<<<<< HEAD
 .env
+=======
+AGENTS.md 
+>>>>>>> ed18fa6d326f24fb4917ab83c9050756a8d7247e
