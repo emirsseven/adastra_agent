@@ -1,6 +1,9 @@
 from agents import function_tool
 from agents.extensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
 from agents.realtime import RealtimeAgent, realtime_handoff
+import re
+import unicodedata
+import difflib
 
 """
 Local UI example entrypoint. The server will use get_starting_agent() as
@@ -67,36 +70,81 @@ def inventory_list_drinks() -> list[dict]:
 
 @function_tool(name_override="inventory_normalize_item")
 def inventory_normalize_item(text: str) -> dict:
-    """Return canonical name/type for a free-text item, naive aliases."""
+    """Return canonical name/type for a free-text item using robust normalization."""
     if not text:
         return {"canonical_name": None, "type": None, "confidence": 0.0}
-    t = text.lower().strip()
+
+    def _strip_accents(s: str) -> str:
+        return "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
+
+    raw = _strip_accents(str(text).lower())
+    raw = re.sub(r"[^a-z0-9\s]", " ", raw)
+    stop = {"pizza", "adet", "tane", "pcs", "piece", "stuks", "cm"}
+    tokens = [tok for tok in raw.split() if tok not in stop and not tok.isdigit()]
+    t = " ".join(tokens).strip()
+
     aliases = {
         # pizzas
+        "margerita": "Margherita",
         "margarita": "Margherita",
         "margherita": "Margherita",
         "margharita": "Margherita",
         "pepperoni": "Pepperoni",
+        "peperoni": "Pepperoni",
+        "pepproni": "Pepperoni",
+        "vegan margerita": "Vegan Margherita",
         "vegan margherita": "Vegan Margherita",
         "vegan margarita": "Vegan Margherita",
         "bbq meat": "BBQ Meat Lovers",
+        "barbeku meat": "BBQ Meat Lovers",
+        "bbq": "BBQ Meat Lovers",
+        "barbeku met lavirs": "BBQ Meat Lovers",
         "bbq meat lovers": "BBQ Meat Lovers",
+        "bebequ mit lovers": "BBQ Meat Lovers",
         "caprese": "Caprese",
+        "kaprese": "Caprese",
+        "capriese": "Caprese",
+        "kapriese": "Caprese",
+
         # drinks
         "kola": "Coca-Cola 330ml",
+        "koka kola": "Coca-Cola 330ml",
         "coca cola": "Coca-Cola 330ml",
         "coke": "Coca-Cola 330ml",
         "coke zero": "Coca-Cola Zero 330ml",
         "kola zero": "Coca-Cola Zero 330ml",
+        "koka kola zero": "Coca-Cola Zero 330ml",
+        "coca cola zero": "Coca-Cola Zero 330ml",
         "fanta": "Fanta 330ml",
         "red bull": "Red Bull",
         "spa": "Spa Blauw",
+        "spa blauw": "Spa Blauw",
+        "sipa blauv": "Spa Blauw",
+        
     }
-    name = aliases.get(t)
-    if not name:
-        return {"canonical_name": None, "type": None, "confidence": 0.0}
-    typ = "pizza" if any(p["name"] == name for p in PIZZAS) else "drink"
-    return {"canonical_name": name, "type": typ, "confidence": 0.95}
+    # substring match (prefer longest key)
+    sub_matches = [k for k in aliases.keys() if k in t]
+    if sub_matches:
+        key = max(sub_matches, key=len)
+        name = aliases[key]
+        typ = "pizza" if any(p["name"] == name for p in PIZZAS) else "drink"
+        return {"canonical_name": name, "type": typ, "confidence": 0.95}
+
+    # fuzzy match against aliases and canonical names
+    keys = list(aliases.keys()) + [p["name"].lower() for p in PIZZAS] + [d["name"].lower() for d in DRINKS]
+    best = difflib.get_close_matches(t, keys, n=1, cutoff=0.85)
+    if best:
+        k = best[0]
+        name = (
+            aliases.get(k)
+            or next((p["name"] for p in PIZZAS if p["name"].lower() == k), None)
+            or next((d["name"] for d in DRINKS if d["name"].lower() == k), None)
+        )
+        if name:
+            typ = "pizza" if any(p["name"] == name for p in PIZZAS) else "drink"
+            return {"canonical_name": name, "type": typ, "confidence": 0.88}
+
+    return {"canonical_name": None, "type": None, "confidence": 0.0}
 
 
 # --- Order State Tools ---
@@ -215,6 +263,7 @@ Goal: Collect pizza names and quantities (canonical menu only), then a single si
 Rules:
 - On your first turn after handoff, call order_state_clear() to reset state.
 - Use Inventory tools to validate or normalize items (inventory_normalize_item). Accept only canonical names from the menu.
+- When calling inventory_normalize_item, pass only product name tokens (no quantities or sizes).
 - Use Order State tools for ALL writes: order_state_add_item, order_state_set_size_for_all, order_state_add_drink, order_state_summary, order_state_confirm.
 - If input is invalid or uncertain, briefly reprompt. Ignore unrelated chit-chat.
 - Ask only what is necessary; proceed step-by-step.
